@@ -44,12 +44,8 @@ struct EmbeddedTerminalView: NSViewRepresentable {
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let tv = LocalProcessTerminalView(frame: .zero)
 
-        // Set terminal background/foreground colors from the active theme.
-        let themeColors = ThemeStore.shared.colors
-        tv.nativeBackgroundColor = NSColor(themeColors.codeBackground)
-            .usingColorSpace(.sRGB) ?? NSColor.black
-        tv.nativeForegroundColor = NSColor(themeColors.textPrimary)
-            .usingColorSpace(.sRGB) ?? NSColor.white
+        // Apply the active theme and keep following later theme switches.
+        context.coordinator.attach(terminalView: tv)
 
         tv.processDelegate = context.coordinator
         tv.startProcess(
@@ -143,9 +139,57 @@ struct EmbeddedTerminalView: NSViewRepresentable {
         nonisolated(unsafe) let onTerminated: ((Int32) -> Void)?
         nonisolated(unsafe) var lastFocusTrigger: UUID? = nil
         nonisolated(unsafe) var lastResetTrigger: UUID? = nil
+        private weak var terminalView: LocalProcessTerminalView?
+        nonisolated(unsafe) private var themeObserver: NSObjectProtocol?
 
         nonisolated init(onTerminated: ((Int32) -> Void)?) {
             self.onTerminated = onTerminated
+        }
+
+        deinit {
+            if let observer = themeObserver {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+
+        /// Applies the current theme to the terminal and keeps it in sync with later
+        /// theme switches.
+        func attach(terminalView: LocalProcessTerminalView) {
+            self.terminalView = terminalView
+            applyTheme(to: terminalView)
+            registerThemeObserver()
+        }
+
+        private func registerThemeObserver() {
+            guard themeObserver == nil else { return }
+            themeObserver = NotificationCenter.default.addObserver(
+                forName: .clarcThemeDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let tv = self.terminalView else { return }
+                    self.applyTheme(to: tv)
+                }
+            }
+        }
+
+        private func applyTheme(to tv: LocalProcessTerminalView) {
+            let themeColors = ThemeStore.shared.colors
+            let background = NSColor(themeColors.codeBackground)
+                .usingColorSpace(.sRGB) ?? NSColor.black
+            let foreground = NSColor(themeColors.textPrimary)
+                .usingColorSpace(.sRGB) ?? NSColor.white
+
+            tv.nativeBackgroundColor = background
+            tv.nativeForegroundColor = foreground
+
+            // The native color setters only push the colors into the terminal engine.
+            // The backing layer and the cached text attributes have to be refreshed
+            // explicitly so an already-running terminal repaints with the new theme.
+            tv.layer?.backgroundColor = background.cgColor
+            tv.colorChanged(source: tv.getTerminal(), idx: nil)
+            tv.needsDisplay = true
         }
 
         nonisolated func sizeChanged(source: LocalProcessTerminalView, newCols: Int, newRows: Int) {}
