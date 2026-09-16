@@ -91,6 +91,13 @@ struct MarkdownContentView: View {
                 cachedGroups = groups
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .clarcThemeDidChange)) { _ in
+            // Theme/font-size changes bake into cached groups (colors, image sizes); re-render
+            // from scratch rather than relying on already-displayed views to notice the cache clear.
+            let groups = Self.buildRenderGroups(for: text)
+            RenderGroupCache.shared.set(text, groups)
+            cachedGroups = groups
+        }
     }
 
     // MARK: - Render Groups
@@ -147,11 +154,11 @@ struct MarkdownContentView: View {
         func addNewline(thinSpacing: Bool = false) {
             guard hasContent else { return }
             var sep = AttributedString("\n")
-            if thinSpacing { sep.font = .system(size: 8) }
+            if thinSpacing { sep.font = .system(size: ClaudeTheme.messageSize(8)) }
             current.append(sep)
         }
 
-        func appendPrefixed(prefix: String, content: String, contentColor: Color? = nil, thinSep: Bool = false, prefixFont: Font = .system(size: 15)) {
+        func appendPrefixed(prefix: String, content: String, contentColor: Color? = nil, thinSep: Bool = false, prefixFont: Font = .system(size: ClaudeTheme.messageSize(15))) {
             addNewline(thinSpacing: thinSep)
             var prefixAttr = AttributedString(prefix)
             prefixAttr.font = prefixFont
@@ -227,7 +234,7 @@ struct MarkdownContentView: View {
                 let isFirstOrdered = hasContent && !inListOrQuote
                 afterSpacer = false
                 inListOrQuote = true
-                appendPrefixed(prefix: "  \(number). ", content: content, thinSep: isFirstOrdered, prefixFont: .system(size: 15).monospacedDigit())
+                appendPrefixed(prefix: "  \(number). ", content: content, thinSep: isFirstOrdered, prefixFont: .system(size: ClaudeTheme.messageSize(15)).monospacedDigit())
 
             case .blockquote(let content):
                 if quoteHasContent {
@@ -263,12 +270,12 @@ struct MarkdownContentView: View {
 
     private static func fontForHeading(_ level: Int) -> Font {
         switch level {
-        case 1: return .system(size: 20, weight: .bold)
-        case 2: return .system(size: 18, weight: .bold)
-        case 3: return .system(size: 16, weight: .semibold)
-        case 4: return .system(size: 15, weight: .semibold)
-        case 5: return .system(size: 15, weight: .medium)
-        default: return .system(size: 15, weight: .medium)
+        case 1: return .system(size: ClaudeTheme.messageSize(20), weight: .bold)
+        case 2: return .system(size: ClaudeTheme.messageSize(18), weight: .bold)
+        case 3: return .system(size: ClaudeTheme.messageSize(16), weight: .semibold)
+        case 4: return .system(size: ClaudeTheme.messageSize(15), weight: .semibold)
+        case 5: return .system(size: ClaudeTheme.messageSize(15), weight: .medium)
+        default: return .system(size: ClaudeTheme.messageSize(15), weight: .medium)
         }
     }
 
@@ -623,10 +630,11 @@ func mathAwareText(_ attrStr: AttributedString) -> Text {
     for run in attrStr.runs {
         let piece: Text
         if let latex = run.mathLatex {
-            if let image = MathRenderer.renderImage(latex: latex, fontSize: 15, color: NSColor(ClaudeTheme.textPrimary), display: false) {
+            if let image = MathRenderer.renderImage(latex: latex, fontSize: ClaudeTheme.messageSize(15), color: NSColor(ClaudeTheme.textPrimary), display: false) {
                 piece = Text(Image(nsImage: image))
             } else {
                 piece = Text("$\(latex)$")
+                    .font(.system(size: ClaudeTheme.messageSize(15)))
             }
         } else {
             piece = Text(AttributedString(attrStr[run.range]))
@@ -643,14 +651,14 @@ struct MathBlockView: View {
 
     var body: some View {
         Group {
-            if let image = MathRenderer.renderImage(latex: latex, fontSize: 20, color: NSColor(ClaudeTheme.textPrimary), display: true) {
+            if let image = MathRenderer.renderImage(latex: latex, fontSize: ClaudeTheme.messageSize(20), color: NSColor(ClaudeTheme.textPrimary), display: true) {
                 ScrollView(.horizontal, showsIndicators: false) {
                     Image(nsImage: image)
                         .padding(.vertical, 4)
                 }
             } else {
                 Text(latex)
-                    .font(.system(size: 14, design: .monospaced))
+                    .font(.system(size: ClaudeTheme.messageSize(14), design: .monospaced))
                     .foregroundStyle(ClaudeTheme.statusError)
                     .textSelection(.enabled)
             }
@@ -673,7 +681,7 @@ private func parseInlineMarkdown(_ content: String) -> AttributedString {
         case .math(let latex):
             var placeholder = AttributedString("\u{FFFC}")
             placeholder.mathLatex = latex
-            placeholder.font = .system(size: 15)
+            placeholder.font = .system(size: ClaudeTheme.messageSize(15))
             result.append(placeholder)
         }
     }
@@ -692,7 +700,7 @@ private func parsePlainInlineMarkdown(_ content: String) -> AttributedString {
     var codeRanges: [Range<AttributedString.Index>] = []
     for run in result.runs {
         guard let intent = run.inlinePresentationIntent else {
-            result[run.range].font = .system(size: 15)
+            result[run.range].font = .system(size: ClaudeTheme.messageSize(15))
             continue
         }
         if intent.contains(.code) {
@@ -701,16 +709,16 @@ private func parsePlainInlineMarkdown(_ content: String) -> AttributedString {
             let isBold = intent.contains(.stronglyEmphasized)
             let isItalic = intent.contains(.emphasized)
             switch (isBold, isItalic) {
-            case (true, true):  result[run.range].font = .system(size: 15, weight: .bold).italic()
-            case (true, false): result[run.range].font = .system(size: 15, weight: .bold)
-            case (false, true): result[run.range].font = .system(size: 15).italic()
-            default:            result[run.range].font = .system(size: 15)
+            case (true, true):  result[run.range].font = .system(size: ClaudeTheme.messageSize(15), weight: .bold).italic()
+            case (true, false): result[run.range].font = .system(size: ClaudeTheme.messageSize(15), weight: .bold)
+            case (false, true): result[run.range].font = .system(size: ClaudeTheme.messageSize(15)).italic()
+            default:            result[run.range].font = .system(size: ClaudeTheme.messageSize(15))
             }
         }
     }
     // Inline code spans: monospace font + background color
     for range in codeRanges.reversed() {
-        result[range].font = .system(size: 14, design: .monospaced)
+        result[range].font = .system(size: ClaudeTheme.messageSize(14), design: .monospaced)
         result[range].foregroundColor = ClaudeTheme.textPrimary
         result[range].backgroundColor = ClaudeTheme.surfaceTertiary
         result[range].baselineOffset = 0.5
