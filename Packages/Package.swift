@@ -9,6 +9,9 @@ let package = Package(
         .library(name: "ClarcCore", targets: ["ClarcCore"]),
         .library(name: "ClarcChatKit", targets: ["ClarcChatKit"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/mgriebling/SwiftMath.git", from: "1.7.0"),
+    ],
     targets: [
         .target(
             name: "ClarcCore",
@@ -16,7 +19,10 @@ let package = Package(
         ),
         .target(
             name: "ClarcChatKit",
-            dependencies: ["ClarcCore"],
+            dependencies: [
+                "ClarcCore",
+                .product(name: "SwiftMath", package: "SwiftMath"),
+            ],
             path: "Sources/ClarcChatKit",
             resources: [
                 .process("Resources"),

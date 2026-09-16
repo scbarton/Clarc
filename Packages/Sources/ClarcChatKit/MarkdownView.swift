@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ClarcCore
 
 // MARK: - Render Group Cache
@@ -56,7 +57,7 @@ struct MarkdownContentView: View {
             ForEach(Array(cachedGroups.enumerated()), id: \.offset) { _, group in
                 switch group {
                 case .attributedText(let attrStr):
-                    Text(attrStr)
+                    mathAwareText(attrStr)
                         .textSelection(.enabled)
                         // Reserve the text's ideal height so the final line can't be
                         // clipped at the bubble edge (markdown strips trailing newlines).
@@ -72,6 +73,9 @@ struct MarkdownContentView: View {
                         .padding(.vertical, 8)
                 case .horizontalRule:
                     ClaudeThemeDivider()
+                        .padding(.vertical, 8)
+                case .mathBlock(let latex):
+                    MathBlockView(latex: latex)
                         .padding(.vertical, 8)
                 }
             }
@@ -177,6 +181,10 @@ struct MarkdownContentView: View {
             case .horizontalRule:
                 flush()
                 groups.append(.horizontalRule)
+
+            case .mathBlock(let latex):
+                flush()
+                groups.append(.mathBlock(latex: latex))
 
             case .heading(let level, let content):
                 if hasContent {
@@ -310,6 +318,34 @@ struct MarkdownContentView: View {
                 continue
             }
 
+            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
+
+            // Display math block: $$ ... $$ or \[ ... \] on their own lines
+            if trimmedLine == "$$" || trimmedLine == "\\[" {
+                flushText()
+                let closing = trimmedLine == "$$" ? "$$" : "\\]"
+                var mathLines: [String] = []
+                index += 1
+                while index < lines.count, lines[index].trimmingCharacters(in: .whitespaces) != closing {
+                    mathLines.append(lines[index])
+                    index += 1
+                }
+                if index < lines.count { index += 1 }
+                blocks.append(.mathBlock(latex: mathLines.joined(separator: "\n")))
+                continue
+            }
+
+            // Display math block on a single line: $$...$$ or \[...\]
+            if trimmedLine.count > 4,
+               (trimmedLine.hasPrefix("$$") && trimmedLine.hasSuffix("$$")) ||
+               (trimmedLine.hasPrefix("\\[") && trimmedLine.hasSuffix("\\]")) {
+                flushText()
+                let inner = String(trimmedLine.dropFirst(2).dropLast(2))
+                blocks.append(.mathBlock(latex: inner))
+                index += 1
+                continue
+            }
+
             // Table detection: check if current line + next two lines form a table
             if let table = parseTable(lines: lines, startIndex: index) {
                 flushText()
@@ -327,7 +363,6 @@ struct MarkdownContentView: View {
             }
 
             // Horizontal rule
-            let trimmedLine = line.trimmingCharacters(in: .whitespaces)
             if trimmedLine.count >= 3,
                (trimmedLine.allSatisfy({ $0 == "-" || $0 == " " }) && trimmedLine.contains("-")) ||
                (trimmedLine.allSatisfy({ $0 == "*" || $0 == " " }) && trimmedLine.contains("*")) ||
@@ -495,9 +530,157 @@ private enum RenderGroup {
     case codeBlock(language: String, code: String)
     case table(headers: [String], rows: [[String]])
     case horizontalRule
+    case mathBlock(latex: String)
+}
+
+// MARK: - Inline Math
+
+/// Custom attribute marking a run of `AttributedString` as a placeholder for a rendered
+/// inline math image; the run's text content is a single object-replacement character.
+private struct MathLatexAttribute: AttributedStringKey {
+    typealias Value = String
+    static let name = "com.clarc.mathLatex"
+}
+
+extension AttributeScopes {
+    fileprivate struct ClarcAttributes: AttributeScope {
+        let mathLatex: MathLatexAttribute
+    }
+}
+
+extension AttributeDynamicLookup {
+    fileprivate subscript<T: AttributedStringKey>(dynamicMember keyPath: KeyPath<AttributeScopes.ClarcAttributes, T>) -> T {
+        self[T.self]
+    }
+}
+
+private enum InlineTextSegment {
+    case markdown(String)
+    case math(String)
+}
+
+/// Splits `content` on inline math delimiters (`$...$`, `\(...\)`), leaving inline code
+/// spans (`` `...` ``) untouched so LaTeX-looking text inside code isn't misinterpreted.
+private func splitInlineMath(_ content: String) -> [InlineTextSegment] {
+    guard let codeRegex = try? NSRegularExpression(pattern: "`[^`\n]+`") else {
+        return splitInlineMathIgnoringCode(content)
+    }
+    let ns = content as NSString
+    let codeMatches = codeRegex.matches(in: content, range: NSRange(location: 0, length: ns.length))
+    guard !codeMatches.isEmpty else {
+        return splitInlineMathIgnoringCode(content)
+    }
+    var segments: [InlineTextSegment] = []
+    var lastEnd = 0
+    for match in codeMatches {
+        if match.range.location > lastEnd {
+            let plain = ns.substring(with: NSRange(location: lastEnd, length: match.range.location - lastEnd))
+            segments.append(contentsOf: splitInlineMathIgnoringCode(plain))
+        }
+        segments.append(.markdown(ns.substring(with: match.range)))
+        lastEnd = match.range.location + match.range.length
+    }
+    if lastEnd < ns.length {
+        let plain = ns.substring(with: NSRange(location: lastEnd, length: ns.length - lastEnd))
+        segments.append(contentsOf: splitInlineMathIgnoringCode(plain))
+    }
+    return segments
+}
+
+private func splitInlineMathIgnoringCode(_ content: String) -> [InlineTextSegment] {
+    // `$...$` requires no leading/trailing whitespace inside the delimiters (avoids
+    // matching stray currency like "$5 and $10"); `\(...\)` is unambiguous.
+    let pattern = #"\$(?!\s)([^\$\n]+?)(?<!\s)\$|\\\(([^\n]+?)\\\)"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+        return [.markdown(content)]
+    }
+    let ns = content as NSString
+    let range = NSRange(location: 0, length: ns.length)
+    let matches = regex.matches(in: content, range: range)
+    guard !matches.isEmpty else { return [.markdown(content)] }
+
+    var segments: [InlineTextSegment] = []
+    var lastEnd = 0
+    for match in matches {
+        if match.range.location > lastEnd {
+            segments.append(.markdown(ns.substring(with: NSRange(location: lastEnd, length: match.range.location - lastEnd))))
+        }
+        let latexRange = match.range(at: 1).location != NSNotFound ? match.range(at: 1) : match.range(at: 2)
+        segments.append(.math(ns.substring(with: latexRange)))
+        lastEnd = match.range.location + match.range.length
+    }
+    if lastEnd < ns.length {
+        segments.append(.markdown(ns.substring(with: NSRange(location: lastEnd, length: ns.length - lastEnd))))
+    }
+    return segments
+}
+
+/// Renders an `AttributedString` produced by `parseInlineMarkdown` into a `Text`, substituting
+/// any inline-math placeholder runs with a rasterized LaTeX image.
+@MainActor
+func mathAwareText(_ attrStr: AttributedString) -> Text {
+    var result: Text?
+    for run in attrStr.runs {
+        let piece: Text
+        if let latex = run.mathLatex {
+            if let image = MathRenderer.renderImage(latex: latex, fontSize: 15, color: NSColor(ClaudeTheme.textPrimary), display: false) {
+                piece = Text(Image(nsImage: image))
+            } else {
+                piece = Text("$\(latex)$")
+            }
+        } else {
+            piece = Text(AttributedString(attrStr[run.range]))
+        }
+        result = result.map { $0 + piece } ?? piece
+    }
+    return result ?? Text(attrStr)
+}
+
+// MARK: - Math Block View
+
+struct MathBlockView: View {
+    let latex: String
+
+    var body: some View {
+        Group {
+            if let image = MathRenderer.renderImage(latex: latex, fontSize: 20, color: NSColor(ClaudeTheme.textPrimary), display: true) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Image(nsImage: image)
+                        .padding(.vertical, 4)
+                }
+            } else {
+                Text(latex)
+                    .font(.system(size: 14, design: .monospaced))
+                    .foregroundStyle(ClaudeTheme.statusError)
+                    .textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
 }
 
 private func parseInlineMarkdown(_ content: String) -> AttributedString {
+    let segments = splitInlineMath(content)
+    if segments.count == 1, case .markdown = segments[0] {
+        return parsePlainInlineMarkdown(content)
+    }
+    var result = AttributedString()
+    for segment in segments {
+        switch segment {
+        case .markdown(let text):
+            guard !text.isEmpty else { continue }
+            result.append(parsePlainInlineMarkdown(text))
+        case .math(let latex):
+            var placeholder = AttributedString("\u{FFFC}")
+            placeholder.mathLatex = latex
+            placeholder.font = .system(size: 15)
+            result.append(placeholder)
+        }
+    }
+    return result
+}
+
+private func parsePlainInlineMarkdown(_ content: String) -> AttributedString {
     let autoLinked = autoLinkURLs(sanitizeMarkdownLinkURLs(content))
     guard var result = try? AttributedString(
         markdown: autoLinked,
@@ -580,6 +763,7 @@ private enum MarkdownBlock {
     case table(headers: [String], rows: [[String]])
     case horizontalRule
     case spacer
+    case mathBlock(latex: String)
 }
 
 // MARK: - Blockquote View
@@ -588,7 +772,7 @@ private struct BlockquoteView: View {
     let content: AttributedString
 
     var body: some View {
-        Text(content)
+        mathAwareText(content)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.leading, 13)
@@ -648,7 +832,7 @@ private struct MarkdownTableView: View {
     }
 
     private func cellView(text: String, isHeader: Bool, colIndex: Int) -> some View {
-        Text(parseInlineMarkdown(text))
+        mathAwareText(parseInlineMarkdown(text))
             .font(.system(size: ClaudeTheme.messageSize(14), weight: isHeader ? .semibold : .regular))
             .foregroundStyle(ClaudeTheme.textPrimary)
             .padding(.horizontal, 12)
